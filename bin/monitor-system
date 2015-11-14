@@ -1,0 +1,189 @@
+#!/usr/bin/env python
+# encoding: UTF-8
+###############################################################################
+#
+#   Module:     monitor-system
+#   Author:     L. Spaans
+#   Date:       14 November 2015
+#   Purpose:    
+#
+#   Version:    0.1
+#   Date/Time:  2015-11-14 15:28:00
+#
+#   Amendment history:
+#   20151114    LS      Initial version
+#
+###############################################################################
+
+"""<description placeholder>"""
+
+__author__ = "Léon Spaans"
+
+import ConfigParser
+
+import argparse
+import datetime
+import json
+import math
+import logging
+import operator
+import os
+import re
+import sys
+import time
+import urllib2
+
+from logging.handlers import SysLogHandler
+
+DEF_SCRIPT_NAME = os.path.basename(sys.argv[0])
+DEF_SCRIPT_NAME_NO_EXT = os.path.splitext(DEF_SCRIPT_NAME)[0]
+DEF_SCRIPT_VERSION = 0.1
+
+DEF_PATH_ROOT = os.environ.get('ROOT', os.path.join(
+    '/usr/local', DEF_SCRIPT_NAME_NO_EXT
+))
+DEF_PATH_CONFIG = os.environ.get('CFG', os.path.join(DEF_PATH_ROOT, 'etc'))
+DEF_PATH_DATA = os.environ.get('DATA', os.path.join(DEF_PATH_ROOT, 'var'))
+
+DEF_FILE_CONFIG = os.path.join(DEF_PATH_CONFIG, '.'.join(
+    [DEF_SCRIPT_NAME_NO_EXT,'conf'])
+)
+
+DEF_PATH_ROOT_CONFIG    = '/usr/local/etc'
+DEF_PATH_PID            = '/var/run'
+
+DEF_PATH_MONITOR_CONFIG = os.path.join(
+    DEF_PATH_ROOT_CONFIG,
+    '.'.join([DEF_SCRIPT_NAME_NO_EXT, 'd']
+))
+DEF_FILE_PID            = os.path.join(
+    DEF_PATH_PID, '.'.join(
+    [DEF_SCRIPT_NAME_NO_EXT, 'pid']
+))
+
+DEF_SYSLOG_LEVEL    = 3
+DEF_SYSLOG_FACILITY = SysLogHandler.LOG_LOCAL2
+
+DEF_CONFIG = {
+    DEF_SCRIPT_NAME_NO_EXT: {
+        'path_monitor_config': DEF_PATH_MONITOR_CONFIG,
+        'file_pid':            DEF_FILE_PID
+    },
+    'syslog': {
+        'log_level'    : DEF_SYSLOG_LEVEL,
+        'log_facility' : DEF_SYSLOG_FACILITY
+    }
+}
+
+DEF_MONITOR_CONFIG = {
+}
+
+def get_arguments(
+    script_name=DEF_SCRIPT_NAME,
+    script_version=DEF_SCRIPT_VERSION
+):
+    """
+    Parses the command-line parameters.
+
+    Arguments:
+        script_name    - str(): name of this script
+        script_version - str(): version of this script
+
+    Returns argparse.ArgumentParser() with parsed command-line.
+    """
+    parser = argparse.ArgumentParser(
+        prog=script_name,
+        description='<description placeholder>'
+    )
+    parser.add_argument(
+        '-c', '--config-file',
+        metavar='FILE', nargs='?', default=DEF_FILE_CONFIG,
+        dest='file_cfg', help='a non-default ' +
+            '(i.e. {0}) configuration file'.format(DEF_FILE_CONFIG)
+    )
+    parser.add_argument(
+        '-v', '--version', action='version',
+        version='%(prog)s v{0}'.format(script_version)
+    )
+    arguments = parser.parse_args()
+    return(arguments)
+
+
+def get_config(arguments, default_config=DEF_CONFIG):
+    """
+    Parses script configuration file.
+
+    Arguments:
+        arguments      - argparse.ArgumentParser(): arguments parsed by
+                         get_arguments()
+        default_config - dict(): default configuration values
+
+    Returns ConfigParser.RawConfigParser() with parsed configuration values.
+    """
+    config = ConfigParser.RawConfigParser()
+    for section in default_config:
+        config.add_section(section)
+        for option in default_config[section]:
+            config.set(section, option, default_config[section][option])
+    files_parsed = config.read(os.path.expandvars(arguments.file_cfg))
+    if len(files_parsed) < 1:
+        show_result(
+            '* WARNING: cannot parse configuration file "{0}"\n'.format(
+                arguments.file_cfg
+        ))
+    return(config)
+
+def init_system(config):
+    """
+    """
+    pass
+
+def get_monitor_config(file_monitor_config, config):
+    """
+    """
+    pass
+
+def get_monitor_config_files(config):
+    """
+    """
+    return([])
+
+def monitor(monitor_config, config):
+    """
+    """
+    pass
+
+def monitor_system(config):
+    """
+    """
+    if not system_initiated(config):
+        init_system(config)
+    for file_monitor_config in get_monitor_config_files(config):
+        monitor(get_monitor_config(file_monitor_config, config), config)
+
+def show_result(result, flush=False):
+    """
+    Generic function for screen output (STDOUT), optionally with forced flush.
+
+    Arguments:
+        result - str(): printable string
+    """
+    sys.stdout.write(result)
+    if flush is True:
+        sys.stdout.flush()
+
+def system_initiated(config):
+    """
+    """
+    return(False)
+
+
+def main():
+    """
+    The script's main()-function which is automatically executed when the
+    script is started natively.
+    """
+    monitor_system(get_config(get_arguments()))
+
+if __name__ == '__main__':
+    main()
