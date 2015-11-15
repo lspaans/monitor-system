@@ -4,83 +4,84 @@
 #
 #   Module:     monitor-system
 #   Author:     L. Spaans
-#   Date:       14 November 2015
-#   Purpose:    
+#   Date:       22 November 2015
+#   Purpose:    Monitoring system configuration changes
 #
 #   Version:    0.1
-#   Date/Time:  2015-11-14 15:28:00
+#   Date/Time:  2015-11-23 17:26:00
 #
 #   Amendment history:
-#   20151114    LS      Initial version
+#   20151123    LS      Initial version
 #
 ###############################################################################
 
-"""<description placeholder>"""
+"""A script for monitoring system configuration changes"""
 
 __author__ = "Léon Spaans"
 
 import ConfigParser
 
 import argparse
-import datetime
-import json
-import math
+import filecmp
 import logging
 import operator
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
-import urllib2
 
 from logging.handlers import SysLogHandler
 
-DEF_SCRIPT_NAME = os.path.basename(sys.argv[0])
-DEF_SCRIPT_NAME_NO_EXT = os.path.splitext(DEF_SCRIPT_NAME)[0]
-DEF_SCRIPT_VERSION = 0.1
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+SCRIPT_NAME_NO_EXT = os.path.splitext(SCRIPT_NAME)[0]
+SCRIPT_VERSION = 0.1
 
-DEF_PATH_ROOT = os.environ.get('ROOT', os.path.join(
-    '/usr/local', DEF_SCRIPT_NAME_NO_EXT
+PATH_ROOT = os.environ.get('ROOT', '/usr/local')
+PATH_CONFIG = os.environ.get('CFG', os.path.join(PATH_ROOT, 'etc'))
+PATH_DATA = os.environ.get('DATA', os.path.join(PATH_ROOT, 'var'))
+
+FILE_CONFIG = os.path.join(PATH_CONFIG, '.'.join(
+    [SCRIPT_NAME_NO_EXT, 'conf']
 ))
-DEF_PATH_CONFIG = os.environ.get('CFG', os.path.join(DEF_PATH_ROOT, 'etc'))
-DEF_PATH_DATA = os.environ.get('DATA', os.path.join(DEF_PATH_ROOT, 'var'))
 
-DEF_FILE_CONFIG = os.path.join(DEF_PATH_CONFIG, '.'.join(
-    [DEF_SCRIPT_NAME_NO_EXT,'conf'])
+PATH_ROOT_CONFIG = '/usr/local/etc'
+PATH_PID = '/var/run'
+
+PATH_MONITOR_CONFIG = os.path.join(
+    PATH_ROOT_CONFIG,
+    '.'.join([SCRIPT_NAME_NO_EXT, 'd'])
+)
+FILE_PID = os.path.join(
+    PATH_PID,
+    '.'.join([SCRIPT_NAME_NO_EXT, 'pid'])
 )
 
-DEF_PATH_ROOT_CONFIG    = '/usr/local/etc'
-DEF_PATH_PID            = '/var/run'
+SESSION_ID = os.getpid()
 
-DEF_PATH_MONITOR_CONFIG = os.path.join(
-    DEF_PATH_ROOT_CONFIG,
-    '.'.join([DEF_SCRIPT_NAME_NO_EXT, 'd']
-))
-DEF_FILE_PID            = os.path.join(
-    DEF_PATH_PID, '.'.join(
-    [DEF_SCRIPT_NAME_NO_EXT, 'pid']
-))
+EXIT_CODE = 1
 
-DEF_SYSLOG_LEVEL    = 3
-DEF_SYSLOG_FACILITY = SysLogHandler.LOG_LOCAL2
+SYSLOG_ADDRESS = '/dev/log'
+SYSLOG_FACILITY = SysLogHandler.LOG_LOCAL2
+SYSLOG_LEVEL = 1
 
-DEF_CONFIG = {
-    DEF_SCRIPT_NAME_NO_EXT: {
-        'path_monitor_config': DEF_PATH_MONITOR_CONFIG,
-        'file_pid':            DEF_FILE_PID
+CONFIG = {
+    SCRIPT_NAME_NO_EXT: {
+        'path_monitor_config': PATH_MONITOR_CONFIG,
+        'file_pid': FILE_PID
     },
     'syslog': {
-        'log_level'    : DEF_SYSLOG_LEVEL,
-        'log_facility' : DEF_SYSLOG_FACILITY
+        'log_address': SYSLOG_ADDRESS,
+        'log_facility': SYSLOG_FACILITY,
+        'log_level': SYSLOG_LEVEL
     }
 }
 
-DEF_MONITOR_CONFIG = {
-}
 
 def get_arguments(
-    script_name=DEF_SCRIPT_NAME,
-    script_version=DEF_SCRIPT_VERSION
+    script_name=SCRIPT_NAME,
+    script_version=SCRIPT_VERSION
 ):
     """
     Parses the command-line parameters.
@@ -93,13 +94,15 @@ def get_arguments(
     """
     parser = argparse.ArgumentParser(
         prog=script_name,
-        description='<description placeholder>'
+        description='A script for monitoring system configuration changes'
     )
     parser.add_argument(
         '-c', '--config-file',
-        metavar='FILE', nargs='?', default=DEF_FILE_CONFIG,
-        dest='file_cfg', help='a non-default ' +
-            '(i.e. {0}) configuration file'.format(DEF_FILE_CONFIG)
+        metavar='FILE', nargs='?', default=FILE_CONFIG,
+        dest='file_cfg', help=(
+            'a non-default (i.e. {0}) configuration file').format(
+                FILE_CONFIG
+            )
     )
     parser.add_argument(
         '-v', '--version', action='version',
@@ -109,7 +112,7 @@ def get_arguments(
     return(arguments)
 
 
-def get_config(arguments, default_config=DEF_CONFIG):
+def get_config(arguments, default_config=CONFIG):
     """
     Parses script configuration file.
 
@@ -121,61 +124,556 @@ def get_config(arguments, default_config=DEF_CONFIG):
     Returns ConfigParser.RawConfigParser() with parsed configuration values.
     """
     config = ConfigParser.RawConfigParser()
+
     for section in default_config:
         config.add_section(section)
         for option in default_config[section]:
             config.set(section, option, default_config[section][option])
-    files_parsed = config.read(os.path.expandvars(arguments.file_cfg))
-    if len(files_parsed) < 1:
-        show_result(
-            '* WARNING: cannot parse configuration file "{0}"\n'.format(
-                arguments.file_cfg
-        ))
+
+    if len(config.read(os.path.expandvars(arguments.file_cfg))) < 1:
+        do_exit('cannot parse file', {'file': arguments.file_cfg})
+
     return(config)
+
+
+def get_message_details(details, info=''):
+    """
+    Constructs parenthesized string with semicolon separated key/value-list
+    showing variables and values related to log event.
+
+    Arguments:
+        details - dict(): variables and values related to log event
+        info    - str():  the default value returned in case empty 'detaults'-
+                          dict() was provided
+
+    Returns str() containing generated variable overview.
+    """
+    def is_numeric(value):
+        return(isinstance(value, (int, long, float, complex)))
+
+    if len(details) < 1:
+        return(info)
+
+    return(' ({info})'.format(info=';'.join(map(
+        lambda (k, v): '{0}={1}'.format(
+            k, v if is_numeric(v) else '"{0}"'.format(v)
+        ), details.items()
+    ))))
+
+
+def get_message(
+    message,
+    details={},
+    level=logging.INFO,
+    session_id=SESSION_ID,
+    module=SCRIPT_NAME_NO_EXT
+):
+    """
+    Constructs formatted log message.
+
+    Arguments:
+        message    - str():  unformatted log message
+        details    - dict(): variables and values related to log event
+        level      - int():  log level provided by 'logging'-module
+        session_id - str():  unique session identifier
+        module     - str():  name of this module
+
+    Returns str() containing formatted log message.
+    """
+    log_prefix = ''
+
+    if not is_tty():
+        log_prefix = '{module}[{session_id}] '.format(
+            module=module,
+            session_id=session_id
+        )
+
+    return('{log_prefix}{level}: {message}{details}\n'.format(
+        log_prefix=log_prefix,
+        level=logging.getLevelName(level),
+        message=message,
+        details=get_message_details(details)
+    ))
+
+
+def compare_files(section, file_temp, file_dest, command):
+    """
+    Compares 2 files and takes appropriate action when they are not identical.
+
+    Arguments:
+        section   - str(): section name
+        file_temp - str(): path to temporary file
+        file_dest - str(): path to backup file
+        command   - str(): alert command
+    """
+    if filecmp.cmp(file_temp, file_dest):
+        do_log('files are identical', {
+            'monitor': section,
+            'file_temp': file_temp,
+            'file_dest': file_dest
+        })
+        try:
+            os.remove(file_temp)
+            do_log('removed file', {
+                'monitor': section,
+                'file_temp': file_temp
+            })
+        except:
+            do_exit('could not remove file', {
+                'monitor': section,
+                'file_temp': file_temp
+            })
+    else:
+        do_log('files are not identical', {
+            'monitor': section,
+            'file_temp': file_temp,
+            'file_dest': file_dest
+        }, logging.WARNING)
+        get_spawned_process(section, command)
+
+
+def do_exit(
+    message,
+    details={},
+    level=logging.ERROR,
+    session_id=SESSION_ID,
+    code=EXIT_CODE
+):
+    """
+    Writes last log-message and exits script with appropriate exit code.
+
+    Arguments:
+        message    - str():  unformatted log message
+        details    - dict(): variables and values related to log event
+        level      - int():  log level provided by 'logging'-module
+        session_id - str():  unique session identifier
+        code       - int():  exit code
+    """
+    do_log(message, details, level, session_id)
+    sys.exit(code)
+
+
+def do_log(
+    message,
+    details={},
+    level=logging.INFO,
+    session_id=SESSION_ID,
+    stdout=False,
+    flush=False
+):
+    """
+    Generic function for logging.
+
+    Arguments:
+        message    - str():  unformatted log message
+        details    - dict(): variables and values related to log event
+        level      - int():  log level provided by 'logging'-module
+        session_id - str():  unique session identifier
+        stdout     - bool(): forces output to STDOUT
+        flush      - bool(): indicates forced flush
+    """
+    message = get_message(message, details, level, session_id)
+
+    if (
+        is_tty() or
+        stdout is True
+    ):
+        sys.stderr.write(message)
+        if flush is True:
+            sys.stderr.flush()
+    else:
+        logging.getLogger(__name__).log(level, message)
+
+
+def init_logger(config):
+    """
+    Initializes Syslog.
+
+    Arguments:
+        config - ConfigParser.RawConfigParser(): configuration
+    """
+    if is_tty():
+        return
+
+    log_levels = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
+    log_level = config.get('syslog', 'log_level')
+
+    if config.get('syslog', 'log_level') > len(log_levels):
+        log_level = len(log_levels)
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(log_levels[log_level-1])
+    logger.addHandler(SysLogHandler(
+        address=config.get('syslog', 'log_address'),
+        facility=config.get('syslog', 'log_facility')
+    ))
+
 
 def init_system(config):
     """
-    """
-    pass
-
-def get_monitor_config(file_monitor_config, config):
-    """
-    """
-    pass
-
-def get_monitor_config_files(config):
-    """
-    """
-    return([])
-
-def monitor(monitor_config, config):
-    """
-    """
-    pass
-
-def monitor_system(config):
-    """
-    """
-    if not system_initiated(config):
-        init_system(config)
-    for file_monitor_config in get_monitor_config_files(config):
-        monitor(get_monitor_config(file_monitor_config, config), config)
-
-def show_result(result, flush=False):
-    """
-    Generic function for screen output (STDOUT), optionally with forced flush.
+    Initializes system; creates directory environment.
 
     Arguments:
-        result - str(): printable string
+        config - ConfigParser.RawConfigParser(): configuration
     """
-    sys.stdout.write(result)
-    if flush is True:
-        sys.stdout.flush()
+    do_log('initializing system')
+    for section in config.sections():
+        for option in config.options(section):
+            if (
+                option.startswith('path_') and
+                not os.path.exists(config.get(section, option))
+            ):
+                make_dir(config.get(section, option))
+            if (
+                option.startswith('file_') and
+                not os.path.exists(os.path.dirname(
+                    config.get(section, option))
+                )
+            ):
+                make_dir(os.path.dirname(config.get(section, option)))
+    do_log('system initialized')
 
-def system_initiated(config):
+
+def is_tty():
     """
+    Verifies whether STDOUT is an open file descriptor connected to the slave
+    end of a terminal. The result is used to choose between logging to STDOUT
+    or Syslog.
+
+    Returns bool().
     """
-    return(False)
+    return(os.isatty(sys.stdout.fileno()))
+
+
+def get_monitor_config(file_monitor_config):
+    """
+    Parses a monitor configuration file.
+
+    Arguments:
+        file_monitor_config    - str():  path to monitor configuration file
+
+    Returns ConfigParser.RawConfigParser() with parsed monitor configuration
+    values.
+    """
+    do_log('parsing monitor configuration', {'file': file_monitor_config})
+    config = ConfigParser.RawConfigParser()
+
+    if len(config.read(os.path.expandvars(file_monitor_config))) < 1:
+        do_log(
+            'cannot parse file',
+            {'file': arguments.file_cfg},
+            logging.WARNING
+        )
+
+    do_log('monitor configuration parsed', {'file': file_monitor_config})
+    return(config)
+
+
+def get_monitor_config_files(path_monitor_config=PATH_MONITOR_CONFIG):
+    """
+    Retrieves list of monitor configuration files.
+
+    Arguments:
+        path_monitor_config - str(): path to monitor configuration files
+
+    Returns list() with monitor configuration files.
+    """
+    try:
+        return(filter(lambda f: os.path.isfile(f), map(
+            lambda f: os.path.join(path_monitor_config, f),
+            filter(lambda f: f.lower().endswith('.conf'), os.listdir(
+                path_monitor_config
+            ))
+        )))
+    except:
+        do_exit('cannot retrieve monitor configuration', {
+            'path': path_monitor_config
+        })
+
+
+def get_pid_from_pidfile(file_name=FILE_PID):
+    """
+    Retrieves PID from pidfile.
+
+    Arguments:
+        file_name - str(): path to pidfile
+
+    Returns str() with PID.
+    """
+    try:
+        pidfile = open(file_name, 'r')
+        return(int(pidfile.readline().strip()))
+    except:
+        do_exit('cannot read pidfile', {'file': file_name})
+
+
+def make_dir(path_name):
+    """
+    Makes directory tree.
+
+    Arguments:
+        path_name - str(): directory path
+    """
+    try:
+        os.makedirs(path_name)
+        do_log('created directory', {'path': path_name})
+    except:
+        do_exit('cannot create directory', {'path': path_name})
+
+
+def monitor(monitor_config, config, script_name=SCRIPT_NAME_NO_EXT):
+    """
+    Monitors specific system configuration for changes.
+
+    Arguments:
+        monitor_config - ConfigParser.RawConfigParser(): monitor configuration
+        config         - ConfigParser.RawConfigParser(): configuration
+    """
+    for section in monitor_config.sections():
+        do_log('monitoring started', {'monitor': section})
+        if not monitor_config.has_option(section, 'monitor_command'):
+            do_log('monitor does not have "monitor_command"-option', {
+                'monitor': section
+            }, logging.WARNING)
+            continue
+        file_temp = os.path.join(
+            config.get(script_name, 'path_monitor_backup'),
+            '{0}.tmp'.format(section)
+        )
+        file_dest = os.path.join(
+            config.get(script_name, 'path_monitor_backup'), section
+        )
+        try:
+            write_process_output(
+                section, 
+                get_spawned_process(
+                    section,
+                    monitor_config.get(section, 'monitor_command')
+                ),
+                file_temp
+            )
+        except:
+            do_log('could not write process-output to file', {
+                'monitor': section,
+                'file_temp': file_temp
+            }, logging.WARNING)
+            continue
+        if os.path.exists(file_dest):
+            do_log('file exists', {
+                'monitor': section,
+                'file_dest': file_dest
+            })
+            compare_files(
+                section,
+                file_temp,
+                file_dest,
+                monitor_config.get(section, 'alert_command')
+            )
+        else:
+            rename_file(section, file_temp, file_dest)
+        do_log('finished monitoring', {'monitor': section})
+
+
+def monitor_system(config, script_name=SCRIPT_NAME_NO_EXT):
+    """
+    Monitors system configuration changes.
+
+    Arguments:
+        config      - ConfigParser.RawConfigParser(): configuration
+        script_name - str(): name of this script
+    """
+    init_logger(config)
+    do_log('script started')
+    init_system(config)
+    write_pidfile(config.get(script_name, 'file_pid'))
+
+    for file_monitor_config in get_monitor_config_files(
+            config.get(script_name, 'path_monitor_config')
+    ):
+        monitor(get_monitor_config(file_monitor_config), config)
+
+    remove_pidfile(config.get(script_name, 'file_pid'))
+    do_log('script finished')
+
+
+def process_exists(pid):
+    """
+    Verifies whether a process with supplied PID is already running.
+
+    Arguments:
+        pid - int(): PID
+
+    Returns bool() indicating whether process is already running.
+    """
+    try:
+        os.kill(pid, 0)
+        do_log('process with PID exists', {'pid': pid})
+    except OSError:
+        do_log(
+            'process with PID no longer exists',
+            {'pid': pid},
+            logging.WARNING
+        )
+        return False
+    return True
+
+
+def remove_pidfile(file_name=FILE_PID):
+    """
+    Removes pidfile.
+
+    Arguments:
+        file_name - str(): path to pidfile
+    """
+    do_log('removing pidfile', {'file': file_name})
+    try:
+        os.remove(file_name)
+        do_log('pidfile removed', {'file': file_name})
+    except Exception as e:
+        do_exit('cannot remove pidfile', {'file': file_name})
+
+
+def rename_file(section, file_temp, file_dest):
+    """
+    Renames a file.
+
+    Arguments:
+        section   - str(): section name
+        file_temp - str(): path to temporary file
+        file_dest - str(): path to backup file
+    """
+    do_log('renaming file', {
+        'monitor': section,
+        'file_temp': file_temp,
+        'file_dest': file_dest
+    })
+    try:
+        os.rename(file_temp, file_dest)
+        do_log('renamed file', {
+            'monitor': section,
+            'file_temp': file_temp,
+            'file_dest': file_dest
+        })
+    except:
+        do_exit('could not rename file', {
+            'monitor': section,
+            'file_temp': file_temp,
+            'file_dest': file_dest
+        })
+
+
+def get_spawned_process(section, command):
+    """
+    Spawns a process.
+
+    Arguments:
+        section - str(): section name
+        command - str(): command
+
+    Returns subprocess.Popen().
+    """
+    try:
+        process = subprocess.Popen(
+            shlex.split(command),
+            stdout=subprocess.PIPE
+        )
+        do_log('process spawned', {
+            'monitor': section,
+            'command': command.replace('"', '\\"')
+        })
+    except:
+        do_exit('could not spawn process', {
+            'monitor': section,
+            'command': command.replace('"', '\\"')
+        })
+    return(process)
+
+def write_pidfile(file_name=FILE_PID):
+    """
+    Writes pidfile.
+
+    Arguments:
+        file_name - str(): path to pidfile
+    """
+    do_log('writing pidfile', {'file': file_name})
+
+    if os.path.exists(file_name):
+        if process_exists(get_pid_from_pidfile(file_name)):
+            do_exit('process is already running')
+        remove_pidfile(file_name)
+    try:
+        pidfile = open(file_name, 'w')
+        pidfile.write(str(os.getpid()))
+        pidfile.close()
+        do_log('pidfile written', {'file': file_name})
+    except Exception as e:
+        do_exit('cannot write pidfile', {'file': file_name})
+
+
+def write_process_output(section, process, file_name):
+    """
+
+    Arguments:
+        section   - str():              section name
+        process   - subprocess.Popen(): process handle
+        file_name - str():              path to output-file
+    """
+    
+    try:
+        file_exists = os.path.exists(file_name)
+        if file_exists:
+            do_log('file already exists', {
+                'monitor': section,
+                'file_temp': file_name
+            }, logging.WARNING)
+        else:
+            do_log('file does not yet exist', {
+                'monitor': section,
+                'file_temp': file_name
+            })
+    except:
+        do_exit('could not determine existence of file', {
+            'monitor': section,
+            'file_temp': file_name
+        })
+        raise
+    if file_exists:
+        raise IOError('file ready exists')
+    try:
+        file = open(file_name, 'w')
+        do_log('opened file for writing', {
+            'monitor': section,
+            'file_temp': file_name
+        })
+    except:
+        do_exit('could not open file for writing', {
+            'monitor': section,
+            'file_temp': file_name
+        })
+
+    do_log('writing command subprocess-output to file', {
+        'monitor': section,
+        'file_temp': file_name
+    })
+    for line in iter(process.stdout.readline, ''):
+        file.write(line)
+
+    do_log('finished writing command subprocess-output to file', {
+        'monitor': section,
+        'file_temp': file_name
+    })
+
+    try:
+        file.close()
+        do_log('closed file after writing', {
+            'monitor': section,
+            'file_temp': file_name
+        })
+    except:
+        do_log('could not close file after writing', {
+            'monitor': section,
+            'file_temp': file_name
+        }, logging.WARNING)
 
 
 def main():
@@ -184,6 +682,7 @@ def main():
     script is started natively.
     """
     monitor_system(get_config(get_arguments()))
+
 
 if __name__ == '__main__':
     main()

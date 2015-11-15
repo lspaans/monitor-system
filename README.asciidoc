@@ -1,1 +1,64 @@
-# monitor-system
+:toc:
+:imagesdir: docs/images
+:homepage: https://github.com/lspaans/monitor-system/
+
+= Monitor System
+
+== Description
+
+This is a script for monitoring system configuration changes.
+
+By repeatedly running a configurable set of UNIX shell-commands, comparing
+their outputs and spawning an alarm-process upon encountering a difference in
+output you will get a better grip on a system's configuration changes.
+
+NOTE: This script is supposed to be a lightweight means for keeping an eye on
+what's going on on your server. The checks you can do with this script are
+fairly superficial and should not replace those of more heavy weight tools.
+
+A few examples:
+
+----
+[netstat]
+monitor_command = netstat -t -u -na | grep LISTEN
+alert_command   = echo "WARNING: 'netstat'-output changed" | mail -s netstat \
+                      me@inter.net
+----
+
+If your system is dependent on a number of tcp/udp listeners, this could be
+an easy way to check whether they still exist. This check does of course not
+check whether the listeners provide the expected responses.
+
+----
+[passwd]
+monitor_command = cat /etc/passwd
+alert_command   = touch /tmp/passwd_alert
+----
+
+If your system is dependent on a number of application user accounts, this
+could be an easy way to monitor their existence.
+
+== Operation
+
+The `monitor-system`-script should typically be run by a `/etc/cron.d`-entry
+under the `root`-account.
+
+The script first tries to open it's main configuration file
+(default `/usr/local/etc/monitor-system.conf`). When the file cannot be opened
+or it is unavailable, the script will fallback to it's default values.
+
+Then it initializes it's working environment, by creating all necessary
+directories if they do not yet exist.
+
+After that the script will search for monitor configuration files (default
+`/etc/monitor-system.d`), parse and process them.
+
+when available a `monitor_command`-value will be spawned and it's output will
+be written to a temporary file (default
+`/var/run/monitor-system/<monitor>.tmp`). If a temporary file already exists a
+warning will be logged and then this monitoring-task will be cancelled. If a
+regular monitor output-file alreay exists (default
+`/var/run/monitor-system/<monitor>`) the contents of the 2 files will be
+compared. If identical, the temporary file will be removed. If not identical
+a warning will be logged and an alert command will be spawned. Both the
+temporary and the regular file will remain in place.
