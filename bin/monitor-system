@@ -336,7 +336,7 @@ def init_system(config):
 
 def is_tty():
     """
-    Verifies whether STDOUT is an open file descriptor connected to the slave
+    Verifies whether STDOUT is an open file descriptor connected to the remote
     end of a terminal. The result is used to choose between logging to STDOUT
     or Syslog.
 
